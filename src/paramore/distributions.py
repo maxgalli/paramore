@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jaxtyping import Array, Float
 from quadax import quadgk
+from math import comb
 
 # ============================================================================
 # BasePDF classes
@@ -115,6 +116,30 @@ class Exponential(BasePDF):
         )
         return -jnp.log(z) / self.lambd
 
+        
+class BernsteinPolynomial(BasePDF):
+    def __init__(
+        self,
+        coefs: Float[Array, "degree"] | list[float],
+        lower: Float[Array, ""] | float,
+        upper: Float[Array, ""] | float,
+    ):
+        self.coefs = jnp.asarray(coefs)
+        self.lower = jnp.asarray(lower)
+        self.upper = jnp.asarray(upper)
+        self.degree = self.coefs.shape[0] - 1
+        self._binom = jnp.array([comb(self.degree, k) for k in range(self.degree + 1)])
+
+    def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
+        t = (x - self.lower) / (self.upper - self.lower)
+        s = 1.0 - t
+        k = jnp.arange(self.degree + 1)
+        basis = self._binom * jnp.expand_dims(t, -1)**k * jnp.expand_dims(s, -1)**(self.degree - k)
+        return jnp.dot(basis, self.coefs)
+    
+    def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
+        return NotImplementedError("Sampling from BernsteinPolynomial is not implemented yet")
+
 
 class SumPDF(BasePDF):
     """Weighted sum of multiple PDFs.
@@ -176,10 +201,11 @@ class SumPDF(BasePDF):
         return result
 
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
-        """Not used for SumPDF, raises NotImplementedError."""
+        #"""Not used for SumPDF, raises NotImplementedError."""
         raise NotImplementedError(
             "SumPDF computes weighted sum of normalized PDFs, use prob() instead"
         )
+        #return self.prob(x)  # For compatibility, treat unnormalized_prob as prob
 
     def log_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         """Return log of weighted sum probability."""
