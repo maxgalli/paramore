@@ -22,6 +22,7 @@ from .distributions import (
     BasePDF,
     Exponential,
     Gaussian,
+    BernsteinPolynomial,
     SumPDF,
 )
 from .likelihood import create_extended_nll, create_nll
@@ -36,6 +37,7 @@ __all__ = [
     "BasePDF",
     "Gaussian",
     "Exponential",
+    "BernsteinPolynomial",
     "SumPDF",
     # Modifiers
     "SymmLogNormalModifier",
