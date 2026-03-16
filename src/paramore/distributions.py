@@ -81,6 +81,24 @@ class Gaussian(BasePDF):
     def unnormalized_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         return jnp.exp(-0.5 * ((x - self.mu) / self.sigma) ** 2)
 
+    def integrate(self, lower=None, upper=None) -> Float[Array, ""]:
+        """Analytically integrate the unnormalized Gaussian kernel over [lower, upper].
+
+        Uses the closed-form result via erf:
+            ∫_a^b exp(-½((x-μ)/σ)²) dx = σ√(π/2) · [erf((b-μ)/(σ√2)) − erf((a-μ)/(σ√2))]
+        """
+        lower = self.lower if lower is None else lower
+        upper = self.upper if upper is None else upper
+        sqrt2 = jnp.sqrt(jnp.array(2.0))
+        return (
+            self.sigma
+            * jnp.sqrt(jnp.pi / 2.0)
+            * (
+                jax.scipy.special.erf((upper - self.mu) / (self.sigma * sqrt2))
+                - jax.scipy.special.erf((lower - self.mu) / (self.sigma * sqrt2))
+            )
+        )
+
     def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
         return jax.random.normal(key, shape=(n_events,)) * self.sigma + self.mu
 
@@ -206,6 +224,27 @@ class SumPDF(BasePDF):
             "SumPDF computes weighted sum of normalized PDFs, use prob() instead"
         )
         #return self.prob(x)  # For compatibility, treat unnormalized_prob as prob
+
+    def integrate(self, lower=None, upper=None) -> Float[Array, ""]:
+        """Integrate SumPDF.prob over [lower, upper] by summing component contributions.
+
+        Uses linearity of integration:
+            ∫_a^b SumPDF.prob(x) dx = Σᵢ (νᵢ / ν_total) · pᵢ.integrate(a, b) / pᵢ.integrate()
+        """
+        lower = self.lower if lower is None else lower
+        upper = self.upper if upper is None else upper
+        pdfs = self.pdfs.value if hasattr(self.pdfs, "value") else self.pdfs
+        extended_vals = (
+            self.extended_vals.value
+            if hasattr(self.extended_vals, "value")
+            else self.extended_vals
+        )
+        nu_total = sum(extended_vals)
+        result = jnp.zeros(())
+        for pdf, nu in zip(pdfs, extended_vals):
+            weight = nu / nu_total
+            result = result + weight * pdf.integrate(lower, upper) / pdf.integrate()
+        return result
 
     def log_prob(self, x: Float[Array, "..."]) -> Float[Array, "..."]:
         """Return log of weighted sum probability."""
