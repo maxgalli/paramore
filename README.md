@@ -1,8 +1,8 @@
-# paramore
-
 <div align="center" style="height:250px;width:400px">
-<img src="assets/logo.png" alt="logo"></img>
+<img src="https://raw.githubusercontent.com/maxgalli/paramore/master/assets/logo.png" alt="logo"></img>
 </div>
+
+# paramore
 
 ## Setup
 
