@@ -117,20 +117,15 @@ if __name__ == "__main__":
                             lower=mass.lower,
                             upper=mass.upper,
                         ),
-                        "rate": evm.Parameter(
-                            model_ggH_Tag0_norm_function(
-                                params.mu.get_value(),
-                                xs_ggH,
-                                br_hgg,
-                                eff,
-                                lumi,
-                            ),
-                            name="signal_rate",
+                        "rate": model_ggH_Tag0_norm_function(
+                            params.mu.get_value(),
+                            xs_ggH,
+                            br_hgg,
+                            eff,
+                            lumi,
                         ),
                         "modifiers": [
-                            pm.SymmLogNormalModifier(
-                                parameter=params.phoid_syst, kappa=1.05
-                            ),
+                            params.phoid_syst.scale_log_symmetric(kappa=1.05),
                         ],
                     },
                     "background": {
@@ -139,7 +134,7 @@ if __name__ == "__main__":
                             lower=mass.lower,
                             upper=mass.upper,
                         ),
-                        "rate": params.bkg_norm,
+                        "rate": params.bkg_norm.get_value(),
                         "modifiers": [],
                     },
                 },
@@ -158,9 +153,9 @@ if __name__ == "__main__":
                 pdf = proc["pdf"]
                 rate = proc["rate"]
                 for modifier in proc["modifiers"]:
-                    rate = modifier.apply(rate)
+                    rate = jnp.squeeze(modifier(jnp.array(rate)))
                 pdfs.append(pdf)
-                extended_vals.append(rate.get_value())
+                extended_vals.append(rate)
 
             sum_pdf = pm.SumPDF(
                 pdfs=pdfs,
@@ -192,9 +187,7 @@ if __name__ == "__main__":
         nll = dc_to_nll(params_wrapped, dc)
         return nll
 
-    solver = optimistix.BFGS(
-        rtol=1e-5, atol=1e-7, verbose=frozenset({"step_size", "loss"})
-    )
+    solver = optimistix.BFGS(rtol=1e-5, atol=1e-7)
     fitresult = optimistix.minimise(
         loss_fn,
         solver,

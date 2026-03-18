@@ -75,26 +75,15 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
         upper=mass.upper,
     )
 
-    # Compute signal rate with modifiers
-    signal_rate_base = evm.Parameter(
-        value=params_pytree.mu.get_value() * xs_ggH * br_hgg * eff * lumi,
-        name="signal_rate_base",
-    )
-
     # Apply modifiers
-    phoid_modifier = pm.SymmLogNormalModifier(
-        parameter=params_pytree.phoid_syst, kappa=1.05
-    )
+    phoid_modifier = params_pytree.phoid_syst.scale_log_symmetric(kappa=1.05)
+    jec_modifier   = params_pytree.jec_syst.scale_log_asymmetric(up=1.056, down=0.951)
 
-    jec_modifier = pm.AsymmetricLogNormalModifier(
-        parameter=params_pytree.jec_syst,
-        kappa_up=1.056,
-        kappa_down=0.951,
+    signal_rate = jnp.squeeze(
+        (phoid_modifier @ jec_modifier)(
+            jnp.array(params_pytree.mu.get_value() * xs_ggH * br_hgg * eff * lumi)
+        )
     )
-    composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
-    signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
-
-    signal_rate = signal_rate_with_all_modifiers.get_value()
     bkg_rate = params_pytree.bkg_norm.get_value()
 
     # Create SumPDF and sample with fixed size
@@ -312,23 +301,15 @@ if __name__ == "__main__":
             upper=mass.upper,
         )
 
-        # Compute signal rate with modifiers
-        signal_rate_base = evm.Parameter(
-            value=params_wrapped.mu.get_value() * xs_ggH * br_hgg * eff * lumi,
-            name="signal_rate_base",
-        )
-        phoid_modifier = pm.SymmLogNormalModifier(
-            parameter=params_wrapped.phoid_syst, kappa=1.05
-        )
+        # Apply modifiers
+        phoid_modifier = params_wrapped.phoid_syst.scale_log_symmetric(kappa=1.05)
+        jec_modifier   = params_wrapped.jec_syst.scale_log_asymmetric(up=1.056, down=0.951)
 
-        jec_modifier = pm.AsymmetricLogNormalModifier(
-            parameter=params_wrapped.jec_syst,
-            kappa_up=1.056,
-            kappa_down=0.951,
+        signal_rate = jnp.squeeze(
+            (phoid_modifier @ jec_modifier)(
+                jnp.array(params_wrapped.mu.get_value() * xs_ggH * br_hgg * eff * lumi)
+            )
         )
-        composed_modifier = pm.ComposedModifier(phoid_modifier, jec_modifier)
-        signal_rate_with_all_modifiers = composed_modifier.apply(signal_rate_base)
-        signal_rate = signal_rate_with_all_modifiers.get_value()
 
         bkg_rate = params_wrapped.bkg_norm.get_value()
 
@@ -367,7 +348,7 @@ if __name__ == "__main__":
     # STEP 3: Define single-toy fit function for vmapping
     # ========================================================================
 
-    solver = optimistix.BFGS(rtol=1e-5, atol=1e-7, verbose=frozenset())
+    solver = optimistix.BFGS(rtol=1e-5, atol=1e-7)
 
     @nnx.jit
     def fit_single_toy(toy_data, mask):
