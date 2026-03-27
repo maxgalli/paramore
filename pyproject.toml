@@ -25,6 +25,7 @@ dependencies = [
     "distributed",
     "quadax",
     "joblib>=1.5.2",
+    "everwillow>=0.0.1",
 ]
 
 [tool.setuptools]
