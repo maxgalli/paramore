@@ -84,9 +84,9 @@ if __name__ == "__main__":
     parser.add_argument("--htt", action="store_true", help="Run H→ττ fit only")
     parser.add_argument("--comb", action="store_true", help="Run combined H→γγ + H→ττ fit")
     args = parser.parse_args()
-    run_hgg  = args.hgg  or args.comb or (not args.hgg and not args.htt and not args.comb)
-    run_htt  = args.htt  or args.comb or (not args.hgg and not args.htt and not args.comb)
-    run_comb = args.comb
+    run_comb = args.comb or (not args.hgg and not args.htt)
+    run_hgg  = args.hgg or run_comb
+    run_htt  = args.htt or run_comb
     
     # stuff common to both    
     minuit_transform = MinuitTransform()
