@@ -12,8 +12,6 @@ from evermore.parameters.transform import MinuitTransform, unwrap, wrap
 from flax import nnx
 from jax.experimental import checkify
 from jax.flatten_util import ravel_pytree
-import matplotlib.pyplot as plt
-import numpy as np
 import everwillow as ew
 import everwillow.statelib as sl
 from everwillow.uncertainty import uncertainties, covariance_matrix, correlation_matrix
@@ -22,18 +20,6 @@ from everwillow.uncertainty import uncertainties, covariance_matrix, correlation
 import paramore as pm
 
 wrap_checked = checkify.checkify(wrap)
-
-
-class ConstrainedParameter(evm.Parameter):
-    """evm.Parameter with a custom-width Gaussian prior (for 'param' systematics in Combine)."""
-
-    def __init__(self, *args, constraint_width: float, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.set_metadata('constraint_width', constraint_width)
-
-    @property
-    def prior(self):
-        return evm.pdf.Normal(mean=jnp.array(0.0), width=jnp.array(self.constraint_width))
 
 
 class ParamsHgg(nnx.Pytree):
@@ -96,30 +82,21 @@ if __name__ == "__main__":
     ########
     if run_hgg:
         print("Doing Hgg")
-        # load and plot data to have a look
+        # load data
         data_dir = Path(__file__).resolve().parent / "samples/hgg_htt_discovery"
-        fig_output_dir = Path(__file__).resolve().parent / "figures_hgg_htt_discovery"
         df = pd.read_parquet(data_dir / "cat0_7TeV.parquet")
-        mass_centers = df["mass_center"].values
         n_obs = df["n_obs"].values
-        bin_width = df["mass_hi"].values - df["mass_lo"].values
-    
-        fig, ax = plt.subplots()
-        ax.errorbar(mass_centers, n_obs / bin_width, yerr=np.sqrt(n_obs) / bin_width, fmt="ko", label="data")
-        ax.set_xlim(100, 180)
-        ax.set_ylim(bottom=0)
-        ax.set_xlabel(r"$m_{\gamma\gamma}$ [GeV]")
-        ax.set_ylabel("Events / GeV")
-        fig.tight_layout()
-        for ext in ["png", "pdf"]:
-            fig.savefig(fig_output_dir / f"hgg_data.{ext}")
     
         # define parameters
         lumi_7TeV = evm.NormalParameter(value=0.0, name="lumi_7TeV", lower=-7.0, upper=7.0, transform=minuit_transform)
         n_id = evm.NormalParameter(value=0.0, name="CMS_hgg_n_id", lower=-7.0, upper=7.0, transform=minuit_transform)
         scale_j = evm.NormalParameter(value=0.0, name="CMS_hgg_scale_j", lower=-7.0, upper=7.0, transform=minuit_transform)
-        globalscale = ConstrainedParameter(value=0.0, name="CMS_hgg_globalscale", lower=-0.018868, upper=0.018868, transform=minuit_transform, constraint_width=0.004717)
-        smear = ConstrainedParameter(value=0.0, name="CMS_hgg_nuissancedeltasmearcat0", lower=-0.006176, upper=0.006176, transform=minuit_transform, constraint_width=0.001544)
+        # globalscale and smear float as unit-normal pulls; physical value = pull * sigma
+        # Combine's param constraint N(theta|0,sigma) evaluated at theta=pull*sigma gives 0.5*pull^2
+        # which equals evermore's Normal(0,1) prior on a unit-normal parameter.
+        # Note that globalscale should be NormalParameter, but leave it like that for now
+        globalscale = evm.Parameter(value=0.0, name="CMS_hgg_globalscale", lower=-4.0, upper=4.0, transform=minuit_transform, frozen=True)
+        smear = evm.NormalParameter(value=0.0, name="CMS_hgg_nuissancedeltasmearcat0", lower=-4.0, upper=4.0, transform=minuit_transform)
         r = evm.Parameter(value=1.0, name="r", lower=0.0, upper=10.0, transform=minuit_transform)
         bkg_norm = evm.Parameter(value=233.0, name="bkg_norm", lower=0.0, upper=1000.0, transform=minuit_transform)
         p1 = evm.Parameter(value=-0.4725, name="p1", lower=-10.0, upper=10.0, transform=minuit_transform)
@@ -127,81 +104,9 @@ if __name__ == "__main__":
         p3 = evm.Parameter(value=-0.4936, name="p3", lower=-10.0, upper=10.0, transform=minuit_transform)
         p4 = evm.Parameter(value=-0.000347, name="p4", lower=-10.0, upper=10.0, transform=minuit_transform)
 
-        # Build signal model for 1 production mode as example and plot
         # Signal shape constants for ggH at MH = 125.5 GeV (from workspace)
         MH = 125.5
         MASS_LO, MASS_HI = 100.0, 180.0
-        F_RIGHT = 0.9698
-        F1 = 0.9610
-        DELTA_SMEAR = 0.006173  # GeV
-        DM1, DM2, DMW = -0.044, -1.766, -0.523          # mean offsets [GeV]
-        SIGMA1_NOM, SIGMA2_NOM, SIGMAW_NOM = 1.130, 3.811, 2.537  # [GeV]
-        N_GGH_BASE = 1.930  # rate × BR × σ × ε·A at r=1, all θ=0
-
-        theta_gs = globalscale.get_value()
-        theta_smear = smear.get_value()
-
-        # Means: additive shift from globalscale
-        mu1 = MH + DM1 + theta_gs
-        mu2 = MH + DM2 + theta_gs
-        muw = MH + DMW + theta_gs
-
-        # Sigmas: quadrature smearing formula
-        def smeared_sigma(sigma_nom):
-            return jnp.sqrt(sigma_nom**2 + MH**2 * ((DELTA_SMEAR + theta_smear)**2 - DELTA_SMEAR**2))
-
-        g1 = pm.Gaussian(mu=mu1, sigma=smeared_sigma(SIGMA1_NOM), lower=MASS_LO, upper=MASS_HI)
-        g2 = pm.Gaussian(mu=mu2, sigma=smeared_sigma(SIGMA2_NOM), lower=MASS_LO, upper=MASS_HI)
-        gw = pm.Gaussian(mu=muw, sigma=smeared_sigma(SIGMAW_NOM), lower=MASS_LO, upper=MASS_HI)
-
-        # Full ggH yield with ProcessNorm
-        lumi_mod = lumi_7TeV.scale_log_symmetric(kappa=1.022)
-        sj_mod   = scale_j.scale_log_symmetric(kappa=0.985)
-        nid_mod  = n_id.scale_log_asymmetric(up=0.946, down=1.056)
-        n_ggh = jnp.squeeze((lumi_mod @ sj_mod @ nid_mod)(jnp.array(r.get_value() * N_GGH_BASE)))
-
-        signal_pdf_ggh = pm.SumPDF(
-            pdfs=[g1, g2, gw],
-            extended_vals=[F_RIGHT * F1 * n_ggh, F_RIGHT * (1 - F1) * n_ggh, (1 - F_RIGHT) * n_ggh],
-            lower=MASS_LO,
-            upper=MASS_HI,
-        )
-
-        xs = jnp.array(mass_centers)
-        signal_curve = signal_pdf_ggh.prob(xs) * n_ggh * bin_width[0]
-
-        fig, ax = plt.subplots()
-        ax.plot(mass_centers, signal_curve, "r-", lw=1.5, label=rf"ggH ($\mu=1$, {float(n_ggh):.2f} evt)")
-        ax.set_xlim(100, 180)
-        ax.set_ylim(bottom=0)
-        ax.set_xlabel(r"$m_{\gamma\gamma}$ [GeV]")
-        ax.set_ylabel("Events / GeV")
-        ax.legend()
-        fig.tight_layout()
-        for ext in ["png", "pdf"]:
-            fig.savefig(fig_output_dir / f"hgg_signal_ggh.{ext}")
-        plt.close(fig)
-
-        # Build background model and plot
-        bkg_pdf = pm.BernsteinPolynomial(
-            coefs=jnp.array([1.0, p1.get_value()**2, p2.get_value()**2, p3.get_value()**2, p4.get_value()**2]),  # square the coefficients as done in Combine
-            lower=MASS_LO,
-            upper=MASS_HI,
-        )
-
-        bkg_curve = bkg_pdf.prob(xs) * bkg_norm.get_value() * bin_width[0]
-
-        fig, ax = plt.subplots()
-        ax.plot(mass_centers, bkg_curve, "b-", lw=1.5, label=f"Background (Bernstein, {float(bkg_norm.get_value()):.0f} evt)")
-        ax.set_xlim(MASS_LO, MASS_HI)
-        ax.set_ylim(bottom=0)
-        ax.set_xlabel(r"$m_{\gamma\gamma}$ [GeV]")
-        ax.set_ylabel("Events / GeV")
-        ax.legend()
-        fig.tight_layout()
-        for ext in ["png", "pdf"]:
-            fig.savefig(fig_output_dir / f"hgg_background.{ext}")
-        plt.close(fig)
 
         # Define the model and likelihood
         def model_hgg(params: ParamsHgg):
@@ -272,8 +177,9 @@ if __name__ == "__main__":
             signal_pdfs = {}
             signal_yields = {}
             # Build signal PDFs and yields for each process
-            theta_gs = params.globalscale.get_value()
-            theta_smear = params.smear.get_value()
+            # globalscale/smear are unit-normal pulls; multiply by physical sigma to get GeV shifts
+            theta_gs = params.globalscale.get_value() * 0.004717
+            theta_smear = params.smear.get_value() * 0.001544
             for proc_name, proc_info in signal_procs.items():
                 # Build PDFs
                 mu1 = proc_info["mu1"] + theta_gs
@@ -341,7 +247,7 @@ if __name__ == "__main__":
         #))
         #print("Model test - log_prob at initial parameters:", m.prob(xs))
 
-        @nnx.jit
+        @jax.jit
         def loss_hgg(dynamic, observation, args):
             graphdef, static = args
 
@@ -408,9 +314,30 @@ if __name__ == "__main__":
             grad = jax.grad(value_fn)(flat_opt)
             return jnp.sqrt(jnp.dot(grad, cov_matrix @ grad))
 
-        r_sigma = param_uncertainty(lambda p: p.r.get_value())
+        r_sigma           = param_uncertainty(lambda p: p.r.get_value())
+        lumi_7TeV_sigma   = param_uncertainty(lambda p: p.lumi_7TeV.get_value())
+        n_id_sigma        = param_uncertainty(lambda p: p.n_id.get_value())
+        scale_j_sigma     = param_uncertainty(lambda p: p.scale_j.get_value())
+        #globalscale_sigma = param_uncertainty(lambda p: p.globalscale.get_value())
+        smear_sigma       = param_uncertainty(lambda p: p.smear.get_value())
+        bkg_norm_sigma    = param_uncertainty(lambda p: p.bkg_norm.get_value())
+        p1_sigma          = param_uncertainty(lambda p: p.p1.get_value())
+        p2_sigma          = param_uncertainty(lambda p: p.p2.get_value())
+        p3_sigma          = param_uncertainty(lambda p: p.p3.get_value())
+        p4_sigma          = param_uncertainty(lambda p: p.p4.get_value())
 
         print(f"r = {float(fitted_params_hgg.r.get_value()):.4f} ± {float(r_sigma):.4f}")
+        print(f"lumi_7TeV = {float(fitted_params_hgg.lumi_7TeV.get_value()):.4f} ± {float(lumi_7TeV_sigma):.4f}")
+        print(f"n_id = {float(fitted_params_hgg.n_id.get_value()):.4f} ± {float(n_id_sigma):.4f}")
+        print(f"scale_j = {float(fitted_params_hgg.scale_j.get_value()):.4f} ± {float(scale_j_sigma):.4f}")
+        # reported in pull units; physical value = pull * sigma
+        #print(f"globalscale (pull) = {float(fitted_params_hgg.globalscale.get_value()):.4f} ± {float(globalscale_sigma):.4f}  [{float(fitted_params_hgg.globalscale.get_value()) * 0.004717:.6f} GeV]")
+        print(f"smear (pull) = {float(fitted_params_hgg.smear.get_value()):.4f} ± {float(smear_sigma):.4f}  [{float(fitted_params_hgg.smear.get_value()) * 0.001544:.6f} ± {float(smear_sigma) * 0.001544:.6f} GeV]")
+        print(f"bkg_norm = {float(fitted_params_hgg.bkg_norm.get_value()):.4f} ± {float(bkg_norm_sigma):.4f}")
+        print(f"p1 = {float(fitted_params_hgg.p1.get_value()):.4f} ± {float(p1_sigma):.4f}")
+        print(f"p2 = {float(fitted_params_hgg.p2.get_value()):.4f} ± {float(p2_sigma):.4f}")
+        print(f"p3 = {float(fitted_params_hgg.p3.get_value()):.4f} ± {float(p3_sigma):.4f}")
+        print(f"p4 = {float(fitted_params_hgg.p4.get_value()):.4f} ± {float(p4_sigma):.4f}")
 
     ########
     # Htt
@@ -427,7 +354,6 @@ if __name__ == "__main__":
 
         # Histograms: one JAX array per process (nominal + systematics)
         hists_htt = {col: jnp.array(df_tmpl_htt[col].values) for col in df_tmpl_htt.columns if col not in ("bin_lo", "bin_hi", "bin_center")}
-        print(hists_htt)
 
         def model_htt(params, hists):
             r_mod = params.r.scale()
@@ -452,7 +378,7 @@ if __name__ == "__main__":
             
             return VH_exp + qqH_exp + ggH_exp + EWK_exp + Ztt_exp + Fakes_exp + ttbar_exp
 
-        @nnx.jit
+        @jax.jit
         def loss_htt(dynamic, observation, args):
             graphdef, static, hists = args
         
@@ -568,7 +494,7 @@ if run_comb:
     lumi_7TeV_sigma = param_uncertainty_hgg(lambda p: p.lumi_7TeV.get_value())
     n_id_sigma     = param_uncertainty_hgg(lambda p: p.n_id.get_value())
     scale_j_sigma  = param_uncertainty_hgg(lambda p: p.scale_j.get_value())
-    globalscale_sigma = param_uncertainty_hgg(lambda p: p.globalscale.get_value())
+    #globalscale_sigma = param_uncertainty_hgg(lambda p: p.globalscale.get_value())
     smear_sigma    = param_uncertainty_hgg(lambda p: p.smear.get_value())
     bkg_norm_sigma = param_uncertainty_hgg(lambda p: p.bkg_norm.get_value())
     p1_sigma       = param_uncertainty_hgg(lambda p: p.p1.get_value())
@@ -582,8 +508,9 @@ if run_comb:
     print(f"lumi_7TeV = {float(fitted_params_hgg_comb.lumi_7TeV.get_value()):.4f} ± {float(lumi_7TeV_sigma):.4f}")
     print(f"n_id = {float(fitted_params_hgg_comb.n_id.get_value()):.4f} ± {float(n_id_sigma):.4f}")
     print(f"scale_j = {float(fitted_params_hgg_comb.scale_j.get_value()):.4f} ± {float(scale_j_sigma):.4f}")
-    print(f"globalscale = {float(fitted_params_hgg_comb.globalscale.get_value()):.4f} ± {float(globalscale_sigma):.4f}")
-    print(f"smear = {float(fitted_params_hgg_comb.smear.get_value()):.4f} ± {float(smear_sigma):.4f}")
+    # reported in pull units; physical value = pull * sigma
+    #print(f"globalscale (pull) = {float(fitted_params_hgg_comb.globalscale.get_value()):.4f} ± {float(globalscale_sigma):.4f}  [{float(fitted_params_hgg_comb.globalscale.get_value()) * 0.004717:.6f} GeV]")
+    print(f"smear (pull) = {float(fitted_params_hgg_comb.smear.get_value()):.4f} ± {float(smear_sigma):.4f}  [{float(fitted_params_hgg_comb.smear.get_value()) * 0.001544:.6f} ± {float(smear_sigma) * 0.001544:.6f} GeV]")
     print(f"bkg_norm = {float(fitted_params_hgg_comb.bkg_norm.get_value()):.4f} ± {float(bkg_norm_sigma):.4f}")
     print(f"p1 = {float(fitted_params_hgg_comb.p1.get_value()):.4f} ± {float(p1_sigma):.4f}")
     print(f"p2 = {float(fitted_params_hgg_comb.p2.get_value()):.4f} ± {float(p2_sigma):.4f}")
