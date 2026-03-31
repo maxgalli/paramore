@@ -5,21 +5,20 @@ from functools import partial
 import evermore as evm
 import jax
 import jax.numpy as jnp
-import optimistix
 import pandas as pd
 from evermore.parameters import filter as evm_filter
-from evermore.parameters.transform import MinuitTransform, unwrap, wrap
+from evermore.parameters.transform import MinuitTransform
 from flax import nnx
-from jax.experimental import checkify
-from jax.flatten_util import ravel_pytree
 import everwillow as ew
 import everwillow.statelib as sl
-from everwillow.uncertainty import uncertainties, covariance_matrix, correlation_matrix
+from everwillow.uncertainty import uncertainties
+from everwillow.hypotest.calculators import AsymptoticCalculator
+from everwillow.hypotest.distributions import Q0Asymptotic
+from everwillow.hypotest.test_statistics import Q0
+from everwillow.parameters.transforms import MinuitTransform as EwMinuitTransform
 
 # Import from paramore
 import paramore as pm
-
-wrap_checked = checkify.checkify(wrap)
 
 
 class ParamsHgg(nnx.Pytree):
@@ -94,10 +93,10 @@ if __name__ == "__main__":
         # globalscale and smear float as unit-normal pulls; physical value = pull * sigma
         # Combine's param constraint N(theta|0,sigma) evaluated at theta=pull*sigma gives 0.5*pull^2
         # which equals evermore's Normal(0,1) prior on a unit-normal parameter.
-        # Note that globalscale should be NormalParameter, but leave it like that for now
+        # Note that globalscale should be NormalParameter, but leave it like that for now due to not yet understood issue with adding constraint for globalscale
         globalscale = evm.Parameter(value=0.0, name="CMS_hgg_globalscale", lower=-4.0, upper=4.0, transform=minuit_transform, frozen=True)
         smear = evm.NormalParameter(value=0.0, name="CMS_hgg_nuissancedeltasmearcat0", lower=-4.0, upper=4.0, transform=minuit_transform)
-        r = evm.Parameter(value=1.0, name="r", lower=0.0, upper=10.0, transform=minuit_transform)
+        r = evm.Parameter(value=1.0, name="r")
         bkg_norm = evm.Parameter(value=233.0, name="bkg_norm", lower=0.0, upper=1000.0, transform=minuit_transform)
         p1 = evm.Parameter(value=-0.4725, name="p1", lower=-10.0, upper=10.0, transform=minuit_transform)
         p2 = evm.Parameter(value=-0.0991, name="p2", lower=-10.0, upper=10.0, transform=minuit_transform)
@@ -206,8 +205,8 @@ if __name__ == "__main__":
                 # Build signal yields: rate × BR × xs × eff_times_acc × ProcessNorm(r, θ)
                 n_base = proc_info["rate"] * BR * proc_info["xs"] * proc_info["eff_times_acc"]
                 lumi_mod = params.lumi_7TeV.scale_log_symmetric(kappa=proc_info["kappa_lumi"])
-                sj_mod   = params.scale_j.scale_log_symmetric(kappa=proc_info["kappa_sj"])
-                nid_mod  = params.n_id.scale_log_asymmetric(up=proc_info["kappa_nid_up"], down=proc_info["kappa_nid_down"])
+                sj_mod = params.scale_j.scale_log_symmetric(kappa=proc_info["kappa_sj"])
+                nid_mod = params.n_id.scale_log_asymmetric(up=proc_info["kappa_nid_up"], down=proc_info["kappa_nid_down"])
                 signal_yields[proc_name] = jnp.squeeze((lumi_mod @ sj_mod @ nid_mod)(jnp.array(params.r.get_value() * n_base)))
 
             # Background PDF: degree-4 Bernstein polynomial (c0=1 fixed, c_i = p_i^2)
@@ -251,11 +250,9 @@ if __name__ == "__main__":
         def loss_hgg(dynamic, observation, args):
             graphdef, static = args
 
-            params_unwrapped = nnx.merge(graphdef, dynamic, static, copy=True)
+            params = nnx.merge(graphdef, dynamic, static, copy=True)
 
-            errors, params_wrapped = wrap_checked(params_unwrapped)
-
-            mod, n_tot = model_hgg(params_wrapped)
+            mod, n_tot = model_hgg(params)
 
             # since it is a binned likelihood, we need to integrate the PDF over each bin to get the expected histogram
             bin_integrals = jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(df["mass_lo"].values, df["mass_hi"].values)
@@ -266,7 +263,7 @@ if __name__ == "__main__":
             log_likelihood = evm.pdf.PoissonContinuous(lamb=expectation).log_prob(observation).sum()
 
             # Add parameter constraints from logpdfs
-            constraints = evm.loss.get_log_probs(params_wrapped)
+            constraints = evm.loss.get_log_probs(params)
             log_likelihood += evm.util.sum_over_leaves(constraints)
 
             return -jnp.sum(log_likelihood)
@@ -284,47 +281,48 @@ if __name__ == "__main__":
             p3=p3,
             p4=p4,
         )
-        params_hgg_unwrapped = unwrap(params_hgg)
-        graphdef, diffable, static = nnx.split(params_hgg_unwrapped, evm_filter.is_dynamic_parameter, ...)
+        graphdef, diffable, static = nnx.split(params_hgg, evm_filter.is_dynamic_parameter, ...)
         args = (graphdef, static)
-        init_state = sl.State.from_pytree(diffable)
+        init_state = sl.State.from_pytree(diffable, sep="/")
         graphdef_hgg, static_hgg, args_hgg, init_state_hgg = graphdef, static, args, init_state
+
+        # Everwillow bounds: MinuitTransform per bounded parameter (r has no bounds)
+        # sep="|" avoids conflict with "/" in keys like "bkg_norm/value"
+        bounds_hgg = sl.State.from_pytree({
+            "lumi_7TeV/value": EwMinuitTransform(lower=-7.0, upper=7.0),
+            "n_id/value": EwMinuitTransform(lower=-7.0, upper=7.0),
+            "scale_j/value": EwMinuitTransform(lower=-7.0, upper=7.0),
+            "smear/value": EwMinuitTransform(lower=-4.0, upper=4.0),
+            "bkg_norm/value": EwMinuitTransform(lower=0.0, upper=1000.0),
+            "p1/value": EwMinuitTransform(lower=-10.0, upper=10.0),
+            "p2/value": EwMinuitTransform(lower=-10.0, upper=10.0),
+            "p3/value": EwMinuitTransform(lower=-10.0, upper=10.0),
+            "p4/value": EwMinuitTransform(lower=-10.0, upper=10.0),
+        }, sep="|")
 
         fitresult = ew.fit(
             nll_fn=partial(loss_hgg, args=args),
             params=init_state,
             observation=n_obs,
+            bounds=bounds_hgg,
             max_steps=1000,
         )
 
-        # Extract results
-        fitted_hgg_unwrapped = nnx.merge(graphdef, fitresult.params.to_pytree(), static, copy=True)
-        fitted_params_hgg = wrap(fitted_hgg_unwrapped)
+        # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
+        fitted_params_hgg = nnx.merge(graphdef, fitresult.params.to_pytree(), static, copy=True)
 
-        flat_opt, unravel = ravel_pytree(fitresult.params.to_pytree())
-        cov_matrix = covariance_matrix(partial(loss_hgg, args=args), fitresult.params, n_obs)
-
-        def param_uncertainty(selector):
-            """Propagate covariance from the diffable space to a physical parameter value."""
-            def value_fn(flat_params):
-                params_unwrapped_local = nnx.merge(graphdef, unravel(flat_params), static, copy=True)
-                _, params_wrapped = wrap_checked(params_unwrapped_local)
-                return selector(params_wrapped)
-
-            grad = jax.grad(value_fn)(flat_opt)
-            return jnp.sqrt(jnp.dot(grad, cov_matrix @ grad))
-
-        r_sigma           = param_uncertainty(lambda p: p.r.get_value())
-        lumi_7TeV_sigma   = param_uncertainty(lambda p: p.lumi_7TeV.get_value())
-        n_id_sigma        = param_uncertainty(lambda p: p.n_id.get_value())
-        scale_j_sigma     = param_uncertainty(lambda p: p.scale_j.get_value())
-        #globalscale_sigma = param_uncertainty(lambda p: p.globalscale.get_value())
-        smear_sigma       = param_uncertainty(lambda p: p.smear.get_value())
-        bkg_norm_sigma    = param_uncertainty(lambda p: p.bkg_norm.get_value())
-        p1_sigma          = param_uncertainty(lambda p: p.p1.get_value())
-        p2_sigma          = param_uncertainty(lambda p: p.p2.get_value())
-        p3_sigma          = param_uncertainty(lambda p: p.p3.get_value())
-        p4_sigma          = param_uncertainty(lambda p: p.p4.get_value())
+        sigmas_hgg = uncertainties(partial(loss_hgg, args=args), fitresult.params, n_obs)
+        r_sigma = sigmas_hgg["r/value"]
+        lumi_7TeV_sigma = sigmas_hgg["lumi_7TeV/value"]
+        n_id_sigma = sigmas_hgg["n_id/value"]
+        scale_j_sigma = sigmas_hgg["scale_j/value"]
+        #globalscale_sigma = sigmas_hgg["globalscale/value"]
+        smear_sigma = sigmas_hgg["smear/value"]
+        bkg_norm_sigma = sigmas_hgg["bkg_norm/value"]
+        p1_sigma= sigmas_hgg["p1/value"]
+        p2_sigma= sigmas_hgg["p2/value"]
+        p3_sigma= sigmas_hgg["p3/value"]
+        p4_sigma= sigmas_hgg["p4/value"]
 
         print(f"r = {float(fitted_params_hgg.r.get_value()):.4f} ± {float(r_sigma):.4f}")
         print(f"lumi_7TeV = {float(fitted_params_hgg.lumi_7TeV.get_value()):.4f} ± {float(lumi_7TeV_sigma):.4f}")
@@ -381,60 +379,52 @@ if __name__ == "__main__":
         @jax.jit
         def loss_htt(dynamic, observation, args):
             graphdef, static, hists = args
-        
-            params_unwrapped = nnx.merge(graphdef, dynamic, static, copy=True)
-        
-            errors, params_wrapped = wrap_checked(params_unwrapped)
 
-            expectation = model_htt(params_wrapped, hists)
-        
+            params = nnx.merge(graphdef, dynamic, static, copy=True)
+
+            expectation = model_htt(params, hists)
+
             # Poisson NLL
             log_likelihood = evm.pdf.PoissonContinuous(lamb=expectation).log_prob(observation).sum()
 
             # Add parameter constraints from logpdfs
-            constraints = evm.loss.get_log_probs(params_wrapped)
+            constraints = evm.loss.get_log_probs(params)
             log_likelihood += evm.util.sum_over_leaves(constraints)
-        
+
             return -jnp.sum(log_likelihood)
 
         params_htt = ParamsHtt(
-            r=evm.Parameter(value=1.0, name="r", lower=0.0, upper=10.0, transform=minuit_transform),
+            r=evm.Parameter(value=1.0, name="r"),
             lumi_8TeV=evm.NormalParameter(value=0.0, name="lumi_8TeV", lower=-7.0, upper=7.0, transform=minuit_transform),
             scale_e=evm.NormalParameter(value=0.0, name="scale_e", lower=-4.0, upper=4.0, transform=minuit_transform),
         )
-        params_htt_unwrapped = unwrap(params_htt)
-        graphdef, diffable, static = nnx.split(params_htt_unwrapped, evm_filter.is_dynamic_parameter, ...)
+        graphdef, diffable, static = nnx.split(params_htt, evm_filter.is_dynamic_parameter, ...)
         args = (graphdef, static, hists_htt)
-        init_state = sl.State.from_pytree(diffable)
+        init_state = sl.State.from_pytree(diffable, sep="/")
         graphdef_htt, static_htt, args_htt, init_state_htt = graphdef, static, args, init_state
+
+        # Everwillow bounds: MinuitTransform per bounded parameter (r has no bounds)
+        # sep="|" avoids conflict with "/" in keys like "lumi_8TeV/value"
+        bounds_htt = sl.State.from_pytree({
+            "lumi_8TeV/value": EwMinuitTransform(lower=-7.0, upper=7.0),
+            "scale_e/value": EwMinuitTransform(lower=-4.0, upper=4.0),
+        }, sep="|")
 
         fitresult = ew.fit(
             nll_fn=partial(loss_htt, args=args),
             params=init_state,
             observation=n_obs_htt,
-            max_steps=150
+            bounds=bounds_htt,
+            max_steps=150,
         )
 
-        # Extract results
-        fitted_htt_unwrapped = nnx.merge(graphdef, fitresult.params.to_pytree(), static, copy=True)
-        fitted_params_htt = wrap(fitted_htt_unwrapped)
+        # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
+        fitted_params_htt = nnx.merge(graphdef, fitresult.params.to_pytree(), static, copy=True)
 
-        flat_opt, unravel = ravel_pytree(fitresult.params.to_pytree())
-        cov_matrix = covariance_matrix(partial(loss_htt, args=args), fitresult.params, n_obs_htt)
-
-        def param_uncertainty(selector):
-            """Propagate covariance from the diffable space to a physical parameter value."""
-            def value_fn(flat_params):
-                params_unwrapped_local = nnx.merge(graphdef, unravel(flat_params), static, copy=True)
-                _, params_wrapped = wrap_checked(params_unwrapped_local)
-                return selector(params_wrapped)
-
-            grad = jax.grad(value_fn)(flat_opt)
-            return jnp.sqrt(jnp.dot(grad, cov_matrix @ grad))
-
-        r_sigma = param_uncertainty(lambda p: p.r.get_value())
-        lumi_8TeV_sigma = param_uncertainty(lambda p: p.lumi_8TeV.get_value())
-        scale_e_sigma = param_uncertainty(lambda p: p.scale_e.get_value())
+        sigmas_htt = uncertainties(partial(loss_htt, args=args), fitresult.params, n_obs_htt)
+        r_sigma = sigmas_htt["r/value"]
+        lumi_8TeV_sigma = sigmas_htt["lumi_8TeV/value"]
+        scale_e_sigma = sigmas_htt["scale_e/value"]
 
         print(f"r = {float(fitted_params_htt.r.get_value()):.4f} ± {float(r_sigma):.4f}")
         print(f"lumi_8TeV = {float(fitted_params_htt.lumi_8TeV.get_value()):.4f} ± {float(lumi_8TeV_sigma):.4f}")
@@ -450,59 +440,50 @@ if run_comb:
     nll_htt = lambda p, obs: partial(loss_htt, args=args_htt)(p, obs[1])
 
     combined_nll, combined_state = ew.prepare([nll_hgg, nll_htt], [init_state_hgg, init_state_htt])
+
+    # Combined bounds: union of hgg and htt bounds (r has no bounds in either)
+    # sep="|" avoids conflict with "/" in keys like "bkg_norm/value"
+    bounds_comb = sl.State.from_pytree({
+        "lumi_7TeV/value": EwMinuitTransform(lower=-7.0,    upper=7.0),
+        "n_id/value": EwMinuitTransform(lower=-7.0,    upper=7.0),
+        "scale_j/value": EwMinuitTransform(lower=-7.0,    upper=7.0),
+        "smear/value": EwMinuitTransform(lower=-4.0,    upper=4.0),
+        "bkg_norm/value": EwMinuitTransform(lower=0.0,     upper=1000.0),
+        "p1/value": EwMinuitTransform(lower=-10.0,   upper=10.0),
+        "p2/value": EwMinuitTransform(lower=-10.0,   upper=10.0),
+        "p3/value": EwMinuitTransform(lower=-10.0,   upper=10.0),
+        "p4/value": EwMinuitTransform(lower=-10.0,   upper=10.0),
+        "lumi_8TeV/value": EwMinuitTransform(lower=-7.0,    upper=7.0),
+        "scale_e/value": EwMinuitTransform(lower=-4.0,    upper=4.0),
+    }, sep="|")
+
     fitresult = ew.fit(
         nll_fn=combined_nll,
         params=combined_state,
         observation=(n_obs, n_obs_htt),
+        bounds=bounds_comb,
+        max_steps=1000,
     )
 
-    # Extract results — to_pytree() returns (pytree_hgg, pytree_htt) for the merged state
+    # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
     fitted_pytrees = fitresult.params.to_pytree()
-    fitted_hgg_unwrapped = nnx.merge(graphdef_hgg, fitted_pytrees[0], static_hgg, copy=True)
-    fitted_params_hgg_comb = wrap(fitted_hgg_unwrapped)
-    fitted_htt_unwrapped = nnx.merge(graphdef_htt, fitted_pytrees[1], static_htt, copy=True)
-    fitted_params_htt_comb = wrap(fitted_htt_unwrapped)
+    fitted_params_hgg_comb = nnx.merge(graphdef_hgg, fitted_pytrees[0], static_hgg, copy=True)
+    fitted_params_htt_comb = nnx.merge(graphdef_htt, fitted_pytrees[1], static_htt, copy=True)
 
-    # Build flat_opt using the same key ordering as covariance_matrix internally uses
-    free_keys = tuple(fitresult.params.keys())
-    flat_opt = jnp.array([fitresult.params[k] for k in free_keys])
-    cov_matrix = covariance_matrix(combined_nll, fitresult.params, (n_obs, n_obs_htt))
-
-    def param_uncertainty_hgg(selector):
-        """Propagate covariance from the diffable space to a physical Hgg parameter value."""
-        def value_fn(flat_params):
-            updates = {k: flat_params[i] for i, k in enumerate(free_keys)}
-            pytrees = sl.update(fitresult.params, updates=updates).to_pytree()
-            params_unwrapped_local = nnx.merge(graphdef_hgg, pytrees[0], static_hgg, copy=True)
-            _, params_wrapped = wrap_checked(params_unwrapped_local)
-            return selector(params_wrapped)
-        grad = jax.grad(value_fn)(flat_opt)
-        return jnp.sqrt(jnp.dot(grad, cov_matrix @ grad))
-
-    def param_uncertainty_htt(selector):
-        """Propagate covariance from the diffable space to a physical Htt parameter value."""
-        def value_fn(flat_params):
-            updates = {k: flat_params[i] for i, k in enumerate(free_keys)}
-            pytrees = sl.update(fitresult.params, updates=updates).to_pytree()
-            params_unwrapped_local = nnx.merge(graphdef_htt, pytrees[1], static_htt, copy=True)
-            _, params_wrapped = wrap_checked(params_unwrapped_local)
-            return selector(params_wrapped)
-        grad = jax.grad(value_fn)(flat_opt)
-        return jnp.sqrt(jnp.dot(grad, cov_matrix @ grad))
-
-    r_sigma        = param_uncertainty_hgg(lambda p: p.r.get_value())
-    lumi_7TeV_sigma = param_uncertainty_hgg(lambda p: p.lumi_7TeV.get_value())
-    n_id_sigma     = param_uncertainty_hgg(lambda p: p.n_id.get_value())
-    scale_j_sigma  = param_uncertainty_hgg(lambda p: p.scale_j.get_value())
-    #globalscale_sigma = param_uncertainty_hgg(lambda p: p.globalscale.get_value())
-    smear_sigma    = param_uncertainty_hgg(lambda p: p.smear.get_value())
-    bkg_norm_sigma = param_uncertainty_hgg(lambda p: p.bkg_norm.get_value())
-    p1_sigma       = param_uncertainty_hgg(lambda p: p.p1.get_value())
-    p2_sigma       = param_uncertainty_hgg(lambda p: p.p2.get_value())
-    p3_sigma       = param_uncertainty_hgg(lambda p: p.p3.get_value())
-    p4_sigma       = param_uncertainty_hgg(lambda p: p.p4.get_value())
-    lumi_8TeV_sigma = param_uncertainty_htt(lambda p: p.lumi_8TeV.get_value())
-    scale_e_sigma  = param_uncertainty_htt(lambda p: p.scale_e.get_value())
+    sigmas_comb = uncertainties(combined_nll, fitresult.params, (n_obs, n_obs_htt))
+    r_sigma = sigmas_comb["r/value"]
+    lumi_7TeV_sigma = sigmas_comb["lumi_7TeV/value"]
+    n_id_sigma = sigmas_comb["n_id/value"]
+    scale_j_sigma = sigmas_comb["scale_j/value"]
+    #globalscale_sigma = sigmas_comb["globalscale/value"]
+    smear_sigma = sigmas_comb["smear/value"]
+    bkg_norm_sigma = sigmas_comb["bkg_norm/value"]
+    p1_sigma = sigmas_comb["p1/value"]
+    p2_sigma = sigmas_comb["p2/value"]
+    p3_sigma = sigmas_comb["p3/value"]
+    p4_sigma = sigmas_comb["p4/value"]
+    lumi_8TeV_sigma = sigmas_comb["lumi_8TeV/value"]
+    scale_e_sigma = sigmas_comb["scale_e/value"]
 
     print(f"r = {float(fitted_params_hgg_comb.r.get_value()):.4f} ± {float(r_sigma):.4f}")
     print(f"lumi_7TeV = {float(fitted_params_hgg_comb.lumi_7TeV.get_value()):.4f} ± {float(lumi_7TeV_sigma):.4f}")
@@ -518,3 +499,18 @@ if run_comb:
     print(f"p4 = {float(fitted_params_hgg_comb.p4.get_value()):.4f} ± {float(p4_sigma):.4f}")
     print(f"lumi_8TeV = {float(fitted_params_htt_comb.lumi_8TeV.get_value()):.4f} ± {float(lumi_8TeV_sigma):.4f}")
     print(f"scale_e = {float(fitted_params_htt_comb.scale_e.get_value()):.4f} ± {float(scale_e_sigma):.4f}")
+
+    # Compute observed significance via q0 test statistic (asymptotic formulae, Cowan et al.)
+    print("Significance computation")
+    calc = AsymptoticCalculator(
+        nll_fn=combined_nll,
+        params=combined_state,
+        observation=(n_obs, n_obs_htt),
+        poi_key="r/value",
+        test_statistic=Q0(),
+        distribution=Q0Asymptotic(),
+    )
+    result = calc.test(0.0, bounds=bounds_comb)
+    z_obs = float(calc.distribution.null_significance(result.test_stat_result))
+    print(f"q0 = {float(result.q_obs):.4f}")
+    print(f"Observed significance (asymptotic): Z = {z_obs:.4f} sigma  (p-value = {float(result.pnull):.4e})")
