@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=67", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "paramore"
@@ -28,8 +28,32 @@ dependencies = [
     "everwillow>=0.0.1",
 ]
 
-[tool.setuptools]
-"package-dir" = {"" = "src"}
+[tool.hatch.build.targets.wheel]
+packages = ["src/paramore"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest {args:tests}"
+test-cov = "pytest --cov=paramore {args:tests}"
+
+[tool.hatch.envs.lint]
+detached = true
+dependencies = ["pre-commit"]
+
+[tool.hatch.envs.lint.scripts]
+all = "pre-commit run --all-files"
+
+[tool.hatch.envs.docs]
+dependencies = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
+
+[tool.hatch.envs.docs.scripts]
+serve = "mkdocs serve"
+build = "mkdocs build"
