@@ -1,4 +1,5 @@
 """Helper functions for plotting in examples."""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import mplhep as hep

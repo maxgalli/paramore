@@ -57,3 +57,9 @@ dependencies = [
 [tool.hatch.envs.docs.scripts]
 serve = "mkdocs serve"
 build = "mkdocs build"
+
+[tool.ruff.lint]
+ignore = [
+    "F722",  # jaxtyping annotation strings (e.g. "nbins") are not valid Python expressions
+    "F821",  # jaxtyping annotation strings reference names unknown to ruff
+]

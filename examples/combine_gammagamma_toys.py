@@ -77,7 +77,7 @@ def sample_single_toy(key, params_pytree, mass, xs_ggH, br_hgg, eff, lumi, max_e
 
     # Apply modifiers
     phoid_modifier = params_pytree.phoid_syst.scale_log_symmetric(kappa=1.05)
-    jec_modifier   = params_pytree.jec_syst.scale_log_asymmetric(up=1.056, down=0.951)
+    jec_modifier = params_pytree.jec_syst.scale_log_asymmetric(up=1.056, down=0.951)
 
     signal_rate = jnp.squeeze(
         (phoid_modifier @ jec_modifier)(
@@ -303,7 +303,9 @@ if __name__ == "__main__":
 
         # Apply modifiers
         phoid_modifier = params_wrapped.phoid_syst.scale_log_symmetric(kappa=1.05)
-        jec_modifier   = params_wrapped.jec_syst.scale_log_asymmetric(up=1.056, down=0.951)
+        jec_modifier = params_wrapped.jec_syst.scale_log_asymmetric(
+            up=1.056, down=0.951
+        )
 
         signal_rate = jnp.squeeze(
             (phoid_modifier @ jec_modifier)(

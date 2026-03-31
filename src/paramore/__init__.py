@@ -18,14 +18,14 @@ def _patched_base_param_init(self, *args, **kwargs):
 
 evm.parameters.parameter.BaseParameter.__init__ = _patched_base_param_init
 
-from .distributions import (
+from .distributions import (  # noqa: E402
     BasePDF,
     Exponential,
     Gaussian,
     BernsteinPolynomial,
     SumPDF,
 )
-from .likelihood import create_extended_nll, create_nll
+from .likelihood import create_extended_nll, create_nll  # noqa: E402
 
 __all__ = [
     # Distributions
