@@ -14,8 +14,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Install hatch
+        run: uv tool install hatch
+
       - name: Run tests
-        run: uv run hatch run test
+        run: hatch run test
 
       - name: Run lint
-        run: uv run hatch run lint:all
+        run: hatch run lint:all
