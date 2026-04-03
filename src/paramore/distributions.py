@@ -158,6 +158,27 @@ class BernsteinPolynomial(BasePDF):
         )
         return jnp.dot(basis, self.coefs)
 
+    def integrate(self, lower=None, upper=None) -> Float[Array, ""]:
+        """Analytically integrate the Bernstein polynomial over [lower, upper].
+
+        Uses the identity B_{k,n}(t) = Beta_pdf(t; k+1, n-k+1) / (n+1), giving:
+            ∫_a^b Σ_k c_k B_{k,n}(t) dt
+                = (upper - lower) · Σ_k c_k [betainc(k+1, n-k+1, t_hi) - betainc(k+1, n-k+1, t_lo)] / (n+1)
+        where t_lo, t_hi are the normalized bounds in [0, 1].
+        """
+        lower = self.lower if lower is None else lower
+        upper = self.upper if upper is None else upper
+        n = self.degree
+        t_lo = (lower - self.lower) / (self.upper - self.lower)
+        t_hi = (upper - self.lower) / (self.upper - self.lower)
+        k = jnp.arange(n + 1)
+        a = k + 1.0
+        b = n - k + 1.0
+        cdf_hi = jax.scipy.special.betainc(a, b, t_hi)
+        cdf_lo = jax.scipy.special.betainc(a, b, t_lo)
+        integrals = (cdf_hi - cdf_lo) / (n + 1.0)
+        return jnp.dot(self.coefs, integrals) * (self.upper - self.lower)
+
     def sample(self, key, n_events: int) -> Float[Array, "n_events"]:
         return NotImplementedError(
             "Sampling from BernsteinPolynomial is not implemented yet"
