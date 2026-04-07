@@ -63,3 +63,8 @@ ignore = [
     "F722",  # jaxtyping annotation strings (e.g. "nbins") are not valid Python expressions
     "F821",  # jaxtyping annotation strings reference names unknown to ruff
 ]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+]
