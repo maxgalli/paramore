@@ -1,21 +1,20 @@
 import argparse
 from pathlib import Path
-from functools import partial
 
 import evermore as evm
+import everwillow as ew
+import everwillow.statelib as sl
 import jax
 import jax.numpy as jnp
 import pandas as pd
-from evermore.parameters import filter as evm_filter
 from evermore.parameters.transform import MinuitTransform
-from flax import nnx
-import everwillow as ew
-import everwillow.statelib as sl
-from everwillow.uncertainty import uncertainties
 from everwillow.hypotest.calculators import AsymptoticCalculator
-from everwillow.hypotest.distributions import Q0Asymptotic
-from everwillow.hypotest.test_statistics import Q0
+from everwillow.hypotest.distributions import Q0Asymptotic, QTildeAsymptotic
+from everwillow.hypotest.test_statistics import Q0, QTilde
+from everwillow.hypotest.upper_limit import expected_upper_limit, upper_limit
 from everwillow.parameters.transforms import MinuitTransform as EwMinuitTransform
+from everwillow.uncertainty import uncertainties
+from flax import nnx
 
 # Import from paramore
 import paramore as pm
@@ -120,7 +119,7 @@ if __name__ == "__main__":
             lower=-4.0,
             upper=4.0,
             transform=minuit_transform,
-            frozen=True,
+            # frozen=True,
         )
         smear = evm.NormalParameter(
             value=0.0,
@@ -362,11 +361,7 @@ if __name__ == "__main__":
         # print("Model test - log_prob at initial parameters:", m.prob(xs))
 
         @jax.jit
-        def loss_hgg(dynamic, observation, args):
-            graphdef, static = args
-
-            params = nnx.merge(graphdef, dynamic, static, copy=True)
-
+        def loss_hgg(params, observation):
             mod, n_tot = model_hgg(params)
 
             # since it is a binned likelihood, we need to integrate the PDF over each bin to get the expected histogram
@@ -400,17 +395,7 @@ if __name__ == "__main__":
             p3=p3,
             p4=p4,
         )
-        graphdef, diffable, static = nnx.split(
-            params_hgg, evm_filter.is_dynamic_parameter, ...
-        )
-        args = (graphdef, static)
-        init_state = sl.State.from_pytree(diffable, sep="/")
-        graphdef_hgg, static_hgg, args_hgg, init_state_hgg = (
-            graphdef,
-            static,
-            args,
-            init_state,
-        )
+        init_state_hgg = sl.State.from_pytree(params_hgg, sep="/")
 
         # Everwillow bounds: MinuitTransform per bounded parameter (r has no bounds)
         # sep="|" avoids conflict with "/" in keys like "bkg_norm/value"
@@ -419,6 +404,7 @@ if __name__ == "__main__":
                 "lumi_7TeV/value": EwMinuitTransform(lower=-7.0, upper=7.0),
                 "n_id/value": EwMinuitTransform(lower=-7.0, upper=7.0),
                 "scale_j/value": EwMinuitTransform(lower=-7.0, upper=7.0),
+                "globalscale/value": EwMinuitTransform(lower=-4.0, upper=4.0),
                 "smear/value": EwMinuitTransform(lower=-4.0, upper=4.0),
                 "bkg_norm/value": EwMinuitTransform(lower=0.0, upper=1000.0),
                 "p1/value": EwMinuitTransform(lower=-10.0, upper=10.0),
@@ -430,20 +416,21 @@ if __name__ == "__main__":
         )
 
         fitresult = ew.fit(
-            nll_fn=partial(loss_hgg, args=args),
-            params=init_state,
+            nll_fn=loss_hgg,
+            params=init_state_hgg,
             observation=n_obs,
             bounds=bounds_hgg,
+            fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
             max_steps=1000,
         )
+        fitted_params_hgg = fitresult.params.to_pytree()
 
         # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
-        fitted_params_hgg = nnx.merge(
-            graphdef, fitresult.params.to_pytree(), static, copy=True
-        )
-
         sigmas_hgg = uncertainties(
-            partial(loss_hgg, args=args), fitresult.params, n_obs
+            loss_hgg,
+            fitresult.params,
+            n_obs,
+            fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
         )
         r_sigma = sigmas_hgg["r/value"]
         lumi_7TeV_sigma = sigmas_hgg["lumi_7TeV/value"]
@@ -544,12 +531,8 @@ if __name__ == "__main__":
             )
 
         @jax.jit
-        def loss_htt(dynamic, observation, args):
-            graphdef, static, hists = args
-
-            params = nnx.merge(graphdef, dynamic, static, copy=True)
-
-            expectation = model_htt(params, hists)
+        def loss_htt(params, observation):
+            expectation = model_htt(params, hists_htt)
 
             # Poisson NLL
             log_likelihood = (
@@ -579,17 +562,7 @@ if __name__ == "__main__":
                 transform=minuit_transform,
             ),
         )
-        graphdef, diffable, static = nnx.split(
-            params_htt, evm_filter.is_dynamic_parameter, ...
-        )
-        args = (graphdef, static, hists_htt)
-        init_state = sl.State.from_pytree(diffable, sep="/")
-        graphdef_htt, static_htt, args_htt, init_state_htt = (
-            graphdef,
-            static,
-            args,
-            init_state,
-        )
+        init_state_htt = sl.State.from_pytree(params_htt, sep="/")
 
         # Everwillow bounds: MinuitTransform per bounded parameter (r has no bounds)
         # sep="|" avoids conflict with "/" in keys like "lumi_8TeV/value"
@@ -602,21 +575,16 @@ if __name__ == "__main__":
         )
 
         fitresult = ew.fit(
-            nll_fn=partial(loss_htt, args=args),
-            params=init_state,
+            nll_fn=loss_htt,
+            params=init_state_htt,
             observation=n_obs_htt,
             bounds=bounds_htt,
             max_steps=150,
         )
 
-        # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
-        fitted_params_htt = nnx.merge(
-            graphdef, fitresult.params.to_pytree(), static, copy=True
-        )
+        fitted_params_htt = fitresult.params.to_pytree()
 
-        sigmas_htt = uncertainties(
-            partial(loss_htt, args=args), fitresult.params, n_obs_htt
-        )
+        sigmas_htt = uncertainties(loss_htt, fitresult.params, n_obs_htt)
         r_sigma = sigmas_htt["r/value"]
         lumi_8TeV_sigma = sigmas_htt["lumi_8TeV/value"]
         scale_e_sigma = sigmas_htt["scale_e/value"]
@@ -637,8 +605,8 @@ if __name__ == "__main__":
 if run_comb:
     print("Doing Comb")
     # Wrap each NLL to unpack the combined observation tuple (obs_hgg, obs_htt)
-    nll_hgg = lambda p, obs: partial(loss_hgg, args=args_hgg)(p, obs[0])  # noqa: E731
-    nll_htt = lambda p, obs: partial(loss_htt, args=args_htt)(p, obs[1])  # noqa: E731
+    nll_hgg = lambda p, obs: loss_hgg(p, obs[0])  # noqa: E731
+    nll_htt = lambda p, obs: loss_htt(p, obs[1])  # noqa: E731
 
     combined_nll, combined_state = ew.prepare(
         [nll_hgg, nll_htt], [init_state_hgg, init_state_htt]
@@ -668,19 +636,20 @@ if run_comb:
         params=combined_state,
         observation=(n_obs, n_obs_htt),
         bounds=bounds_comb,
+        fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
         max_steps=1000,
     )
 
-    # Extract results — fitresult.params is in physical space (ewp.wrap applied internally)
     fitted_pytrees = fitresult.params.to_pytree()
-    fitted_params_hgg_comb = nnx.merge(
-        graphdef_hgg, fitted_pytrees[0], static_hgg, copy=True
-    )
-    fitted_params_htt_comb = nnx.merge(
-        graphdef_htt, fitted_pytrees[1], static_htt, copy=True
-    )
+    fitted_params_hgg_comb = fitted_pytrees[0]
+    fitted_params_htt_comb = fitted_pytrees[1]
 
-    sigmas_comb = uncertainties(combined_nll, fitresult.params, (n_obs, n_obs_htt))
+    sigmas_comb = uncertainties(
+        combined_nll,
+        fitresult.params,
+        (n_obs, n_obs_htt),
+        fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
+    )
     r_sigma = sigmas_comb["r/value"]
     lumi_7TeV_sigma = sigmas_comb["lumi_7TeV/value"]
     n_id_sigma = sigmas_comb["n_id/value"]
@@ -744,9 +713,84 @@ if run_comb:
         test_statistic=Q0(),
         distribution=Q0Asymptotic(),
     )
-    result = calc.test(0.0, bounds=bounds_comb)
+    result = calc.test(
+        0.0, bounds=bounds_comb, fixed=sl.State.from_pytree({"globalscale/value": 0.0})
+    )
     z_obs = float(calc.distribution.null_significance(result.test_stat_result))
     print(f"q0 = {float(result.q_obs):.4f}")
     print(
         f"Observed significance (asymptotic): Z = {z_obs:.4f} sigma  (p-value = {float(result.pnull):.4e})"
     )
+
+    # Significance with toys
+    print("Significance computation with toys: TODO")
+
+    # Test also upper limits
+    print("Upper limits")
+    params_hgg.r.value = 0.0
+    params_htt.r.value = 0.0
+    mod, n_tot = model_hgg(params_hgg)
+    n_asimov_hgg = (
+        jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
+            df["mass_lo"].values, df["mass_hi"].values
+        )
+        * n_tot
+    )
+    n_asimov_htt = model_htt(params_htt, hists_htt)
+
+    # def predict(combined_state):
+    #    params_hgg, params_htt = sl.split(combined_state)
+    #    mod, n_tot = model_hgg(params_hgg.to_pytree())
+    #    n_asimov_hgg = jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
+    #        df["mass_lo"].values, df["mass_hi"].values
+    #    )
+    #    n_asimov_htt = model_htt(params_htt.to_pytree(), hists_htt)
+    #    return n_asimov_hgg, n_asimov_htt
+
+    calc = AsymptoticCalculator(
+        nll_fn=combined_nll,
+        params=combined_state,
+        observation=(n_obs, n_obs_htt),
+        poi_key="r/value",
+        test_statistic=QTilde(),
+        distribution=QTildeAsymptotic(),
+        asimov_observation=(n_asimov_hgg, n_asimov_htt),
+        # predict_fn=predict,
+        # mu_asimov=0.0,
+    )
+    result = calc.test(
+        1.0, bounds=bounds_comb, fixed=sl.State.from_pytree({"globalscale/value": 0.0})
+    )
+
+    print(f"Test statistic: {result.q_obs:.4f}")
+    print(f"Null p-value:   {result.pnull:.6f}")
+    print(f"Alt p-value:    {result.palt:.6f}")
+    print(f"CLs:            {calc.cls(result):.6f}")
+
+    bands = calc.expected(result)
+    for name, val in bands.cl_s:
+        print(f"  {name}: {float(val):.6f}")
+
+    # Upper limit
+    print("\n--- Upper limit ---")
+    fit_kwargs = {
+        "bounds": bounds_comb,
+        "fixed": sl.State.from_pytree({"globalscale/value": 0.0}),
+        "max_steps": 1000,
+    }
+
+    def cls_objective(poi):
+        return calc.cls(calc.test(poi, **fit_kwargs))
+
+    limit = upper_limit(cls_objective, bounds=(0.0, 100.0), level=0.05)
+    print(f"95% CL upper limit on r: {float(limit):.4f}")
+
+    # Expected upper limits (Brazil band)
+    def band_cls_objective(poi):
+        r = calc.test(poi, **fit_kwargs)
+        return calc.expected(r).cl_s
+
+    brazil = expected_upper_limit(band_cls_objective, bounds=(0.0, 10.0), level=0.05)
+    print("Expected upper limits:")
+    for name, val in brazil:
+        print(f"  {name}: {float(val):.4f}")
