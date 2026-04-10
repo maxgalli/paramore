@@ -43,3 +43,13 @@ hgg+htt significance:
 ```
 combine 125.5/comb_hgg_htt_pruned_fewsysts_debug.txt --mass 125.5 -M Significance -v 3
 ```
+
+hgg+htt significance with toys:
+```
+combine 125.5/comb_hgg_htt_pruned_fewsysts_debug.txt --mass 125.5 -M HybridNew --LHCmode LHC-significance -T 10000
+```
+
+hgg+htt asymptotic upper limit:
+```
+combine 125.5/comb_hgg_htt_pruned_fewsysts_debug.txt --mass 125.5 -M AsymptoticLimits -v 3
+```

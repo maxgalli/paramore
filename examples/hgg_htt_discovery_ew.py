@@ -8,9 +8,14 @@ import jax
 import jax.numpy as jnp
 import pandas as pd
 from evermore.parameters.transform import MinuitTransform
-from everwillow.hypotest.calculators import AsymptoticCalculator
-from everwillow.hypotest.distributions import Q0Asymptotic, QTildeAsymptotic
+from everwillow.hypotest.calculators import AsymptoticCalculator, HypoTestCalculator
+from everwillow.hypotest.distributions import (
+    Q0Asymptotic,
+    QTildeAsymptotic,
+    SimpleEmpiricalDistribution,
+)
 from everwillow.hypotest.test_statistics import Q0, QTilde
+from everwillow.hypotest.toys import ToyGenerator
 from everwillow.hypotest.upper_limit import expected_upper_limit, upper_limit
 from everwillow.parameters.transforms import MinuitTransform as EwMinuitTransform
 from everwillow.uncertainty import uncertainties
@@ -722,31 +727,71 @@ if run_comb:
         f"Observed significance (asymptotic): Z = {z_obs:.4f} sigma  (p-value = {float(result.pnull):.4e})"
     )
 
-    # Significance with toys
-    print("Significance computation with toys: TODO")
-
     # Test also upper limits
-    print("Upper limits")
-    params_hgg.r.value = 0.0
-    params_htt.r.value = 0.0
-    mod, n_tot = model_hgg(params_hgg)
-    n_asimov_hgg = (
-        jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
-            df["mass_lo"].values, df["mass_hi"].values
-        )
-        * n_tot
-    )
-    n_asimov_htt = model_htt(params_htt, hists_htt)
-
-    # def predict(combined_state):
-    #    params_hgg, params_htt = sl.split(combined_state)
-    #    mod, n_tot = model_hgg(params_hgg.to_pytree())
-    #    n_asimov_hgg = jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
+    # print("Upper limits")
+    # params_hgg.r.value = 0.0
+    # params_htt.r.value = 0.0
+    # mod, n_tot = model_hgg(params_hgg)
+    # n_asimov_hgg = (
+    #    jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
     #        df["mass_lo"].values, df["mass_hi"].values
     #    )
-    #    n_asimov_htt = model_htt(params_htt.to_pytree(), hists_htt)
-    #    return n_asimov_hgg, n_asimov_htt
+    #    * n_tot
+    # )
+    # n_asimov_htt = model_htt(params_htt, hists_htt)
 
+    def predict(combined_state):
+        params_hgg, params_htt = sl.split(combined_state)
+        mod, n_tot = model_hgg(params_hgg.to_pytree())
+        n_asimov_hgg = (
+            jax.vmap(lambda lo, hi: mod.integrate(lo, hi))(
+                df["mass_lo"].values, df["mass_hi"].values
+            )
+            * n_tot
+        )
+        n_asimov_htt = model_htt(params_htt.to_pytree(), hists_htt)
+        return n_asimov_hgg, n_asimov_htt
+
+    # Significance with toys
+    print("Significance computation with toys")
+    toy_gen = ToyGenerator(
+        test_statistic=Q0(),
+        ntoys=10000,
+        map_fn=lambda fn: lambda keys: jax.lax.map(fn, keys),
+    )
+    toys = toy_gen.generate(
+        nll_fn=combined_nll,
+        params=combined_state,
+        observation=(n_obs, n_obs_htt),
+        poi_key="r/value",
+        poi_null=0.0,
+        key=jax.random.key(42),
+        predict_fn=predict,
+        bounds=bounds_comb,
+        fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
+        max_steps=1000,
+    )
+    dist_toys = SimpleEmpiricalDistribution.from_toys(toys)
+    calc_toys = HypoTestCalculator(
+        nll_fn=combined_nll,
+        params=combined_state,
+        observation=(n_obs, n_obs_htt),
+        poi_key="r/value",
+        test_statistic=Q0(),
+        distribution=dist_toys,
+    )
+    result_toys = calc_toys.test(
+        0.0,
+        bounds=bounds_comb,
+        fixed=sl.State.from_pytree({"globalscale/value": 0.0}),
+        max_steps=1000,
+    )
+    z_toys = float(dist_toys.null_significance(result_toys.test_stat_result))
+    print(
+        f"Significance (toys): Z = {z_toys:.4f} sigma  (p-value = {float(result_toys.pnull):.4e})"
+    )
+
+    print("Upper limits")
     calc = AsymptoticCalculator(
         nll_fn=combined_nll,
         params=combined_state,
@@ -754,9 +799,9 @@ if run_comb:
         poi_key="r/value",
         test_statistic=QTilde(),
         distribution=QTildeAsymptotic(),
-        asimov_observation=(n_asimov_hgg, n_asimov_htt),
-        # predict_fn=predict,
-        # mu_asimov=0.0,
+        # asimov_observation=(n_asimov_hgg, n_asimov_htt),
+        predict_fn=predict,
+        mu_asimov=0.0,
     )
     result = calc.test(
         1.0, bounds=bounds_comb, fixed=sl.State.from_pytree({"globalscale/value": 0.0})
